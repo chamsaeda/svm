@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>SVM 알고리즘</title>
+
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <style>
+    body { 
+      font-family: 'Malgun Gothic', sans-serif; 
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      margin: 0;
+      padding: 20px;
+    }
+    canvas { image-rendering: auto; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    const SVMDemo = () => {
+      const canvasRef = useRef(null);
+      const WIDTH = 600;
+      const HEIGHT = 500;
+      const PADDING = 50;
+
+      const generateInitialData = () => {
+        const initialPoints = [];
+        for (let i = 0; i < 8; i++) {
+          initialPoints.push({
+            x: PADDING + 50 + Math.random() * 150,
+            y: PADDING + 50 + Math.random() * 150,
+            class: 1
+          });
+        }
+        for (let i = 0; i < 8; i++) {
+          initialPoints.push({
+            x: WIDTH - PADDING - 200 + Math.random() * 150,
+            y: HEIGHT - PADDING - 200 + Math.random() * 150,
+            class: -1
+          });
+        }
+        return initialPoints;
+      };
+
+      const [points, setPoints] = useState(generateInitialData());
+      const [selectedClass, setSelectedClass] = useState(1);
+      const [kernelMode, setKernelMode] = useState('linear');
+      const [polynomialDegree, setPolynomialDegree] = useState(2);
+      const [rbfGamma, setRbfGamma] = useState(0.5);
+      const [svm, setSvm] = useState(null);
+      const [hovered, setHovered] = useState(null);
+
+      const trainLinearSVM = () => {
+        if (points.length < 2) return null;
+        const class1Points = points.filter(p => p.class === 1);
+        const class2Points = points.filter(p => p.class === -1);
+        if (class1Points.length === 0 || class2Points.length === 0) return null;
+
+        let bestMargin = -Infinity;
+        let bestParams = null;
+
+        for (let angle = 0; angle < 180; angle += 2) {
+          const rad = (angle * Math.PI) / 180;
+          const a = Math.cos(rad);
+          const b = Math.sin(rad);
+          const projections = points.map(p => ({
+            value: a * p.x + b * p.y,
+            class: p.class,
+            point: p
+          }));
+
+          const proj1 = projections.filter(p => p.class === 1);
+          const proj2 = projections.filter(p => p.class === -1);
+          const max1 = Math.max(...proj1.map(p => p.value));
+          const min1 = Math.min(...proj1.map(p => p.value));
+          const max2 = Math.max(...proj2.map(p => p.value));
+          const min2 = Math.min(...proj2.map(p => p.value));
+
+          if (max1 < min2 || max2 < min1) {
+            const boundary = (Math.max(min1, min2) + Math.min(max1, max2)) / 2;
+            const c = -boundary;
+            const margin = Math.min(Math.abs(boundary - max1), Math.abs(boundary - min2));
+
+            if (margin > bestMargin) {
+              bestMargin = margin;
+              const supportVectors = [];
+              const maxValue = Math.max(...proj1.map(p => p.value));
+              const minValue = Math.min(...proj2.map(p => p.value));
+              
+              proj1.forEach(p => {
+                if (Math.abs(p.value - maxValue) < 0.1) supportVectors.push(p.point);
+              });
+              proj2.forEach(p => {
+                if (Math.abs(p.value - minValue) < 0.1) supportVectors.push(p.point);
+              });
+              bestParams = { a, b, c, margin, supportVectors };
+            }
+          }
+        }
+
+        if (!bestParams) {
+          const center1 = {
+            x: class1Points.reduce((sum, p) => sum + p.x, 0) / class1Points.length,
+            y: class1Points.reduce((sum, p) => sum + p.y, 0) / class1Points.length
+          };
+          const center2 = {
+            x: class2Points.reduce((sum, p) => sum + p.x, 0) / class2Points.length,
+            y: class2Points.reduce((sum, p) => sum + p.y, 0) / class2Points.length
+          };
+          const midX = (center1.x + center2.x) / 2;
+          const midY = (center1.y + center2.y) / 2;
+          const dx = center1.x - center2.x;
+          const dy = center1.y - center2.y;
+          const norm = Math.sqrt(dx * dx + dy * dy);
+          const a = dy / norm;
+          const b = -dx / norm;
+          const c = -(a * midX + b * midY);
+          let minDist = Infinity;
+          const supportVectors = [];
+          points.forEach(p => {
+            const dist = Math.abs(a * p.x + b * p.y + c);
+            if (dist < minDist + 0.1) {
+              if (dist < minDist) {
+                minDist = dist;
+                supportVectors.length = 0;
+              }
+              supportVectors.push(p);
+            }
+          });
+          bestParams = { a, b, c, margin: minDist, supportVectors };
+        }
+        return bestParams;
+      };
+
+      const trainPolynomialSVM = () => {
+        if (points.length < 2) return null;
+        const class1Points = points.filter(p => p.class === 1);
+        const class2Points = points.filter(p => p.class === -1);
+        if (class1Points.length === 0 || class2Points.length === 0) return null;
+
+        // 실제 데이터의 중심점 계산
+        const allX = points.map(p => p.x);
+        const allY = points.map(p => p.y);
+        const centerX = (Math.max(...allX) + Math.min(...allX)) / 2;
+        const centerY = (Math.max(...allY) + Math.min(...allY)) / 2;
+        const rangeX = Math.max(...allX) - Math.min(...allX);
+        const rangeY = Math.max(...allY) - Math.min(...allY);
+        const scale = Math.max(rangeX, rangeY) / 2 + 50;
+
+        const transformPoint = (p, degree) => {
+          const nx = (p.x - centerX) / scale;
+          const ny = (p.y - centerY) / scale;
+          const features = [1, nx, ny];
+          if (degree >= 2) features.push(nx * nx, nx * ny, ny * ny);
+          if (degree >= 3) features.push(nx * nx * nx, nx * nx * ny, nx * ny * ny, ny * ny * ny);
+          return features;
+        };
+
+        const transformedData = points.map(p => ({
+          features: transformPoint(p, polynomialDegree),
+          class: p.class,
+          original: p
+        }));
+
+        let weights = Array(transformedData[0].features.length).fill(0).map(() => (Math.random() - 0.5) * 0.1);
+        for (let epoch = 0; epoch < 200; epoch++) {
+          let errors = 0;
+          transformedData.forEach(d => {
+            const prediction = weights.reduce((sum, w, i) => sum + w * d.features[i], 0);
+            if ((prediction >= 0 ? 1 : -1) !== d.class) {
+              errors++;
+              for (let i = 0; i < weights.length; i++) {
+                weights[i] += 0.1 * d.class * d.features[i];
+              }
+            }
+          });
+          if (errors === 0) break;
+        }
+
+        const supportVectors = [];
+        transformedData.forEach(d => {
+          const value = weights.reduce((sum, w, i) => sum + w * d.features[i], 0);
+          if (Math.abs(value) < 0.5) supportVectors.push(d.original);
+        });
+
+        return { weights, supportVectors, degree: polynomialDegree, centerX, centerY, scale };
+      };
+
+      const trainRBFSVM = () => {
+        if (points.length < 2) return null;
+        const class1Points = points.filter(p => p.class === 1);
+        const class2Points = points.filter(p => p.class === -1);
+        if (class1Points.length === 0 || class2Points.length === 0) return null;
+        return { points: [...points], gamma: rbfGamma, supportVectors: [...points] };
+      };
+
+      const handleTrain = () => {
+        if (kernelMode === 'linear') {
+          const result = trainLinearSVM();
+          setSvm(result ? { ...result, type: 'linear' } : null);
+        } else if (kernelMode === 'polynomial') {
+          const result = trainPolynomialSVM();
+          setSvm(result ? { ...result, type: 'polynomial' } : null);
+        } else if (kernelMode === 'rbf') {
+          const result = trainRBFSVM();
+          setSvm(result ? { ...result, type: 'rbf' } : null);
+        }
+      };
+
+      useEffect(() => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, WIDTH, HEIGHT);
+
+        ctx.strokeStyle = '#e0e7ff';
+        ctx.lineWidth = 1;
+        for (let i = 0; i <= 10; i++) {
+          const x = PADDING + (WIDTH - 2 * PADDING) * i / 10;
+          const y = PADDING + (HEIGHT - 2 * PADDING) * i / 10;
+          ctx.beginPath();
+          ctx.moveTo(x, PADDING);
+          ctx.lineTo(x, HEIGHT - PADDING);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(PADDING, y);
+          ctx.lineTo(WIDTH - PADDING, y);
+          ctx.stroke();
+        }
+
+        if (svm) {
+          if (svm.type === 'linear') {
+            const { a, b, c, margin } = svm;
+            const drawLine = (offset, style, width, dash = []) => {
+              ctx.strokeStyle = style;
+              ctx.lineWidth = width;
+              ctx.setLineDash(dash);
+              ctx.beginPath();
+              if (Math.abs(b) < 0.01) {
+                const x = -(c + offset) / a;
+                ctx.moveTo(x, PADDING);
+                ctx.lineTo(x, HEIGHT - PADDING);
+              } else {
+                const x1 = PADDING;
+                const y1 = -(a * x1 + c + offset) / b;
+                const x2 = WIDTH - PADDING;
+                const y2 = -(a * x2 + c + offset) / b;
+                ctx.moveTo(x1, y1);
+                ctx.lineTo(x2, y2);
+              }
+              ctx.stroke();
+            };
+            drawLine(0, '#2563eb', 3);
+            drawLine(-margin, '#93c5fd', 2, [5, 5]);
+            drawLine(margin, '#93c5fd', 2, [5, 5]);
+            ctx.setLineDash([]);
+          } else if (svm.type === 'polynomial') {
+            const { weights, degree, centerX, centerY, scale } = svm;
+            const predict = (x, y) => {
+              const nx = (x - centerX) / scale;
+              const ny = (y - centerY) / scale;
+              const features = [1, nx, ny];
+              if (degree >= 2) features.push(nx * nx, nx * ny, ny * ny);
+              if (degree >= 3) features.push(nx * nx * nx, nx * nx * ny, nx * ny * ny, ny * ny * ny);
+              return weights.reduce((sum, w, i) => sum + w * features[i], 0);
+            };
+
+            for (let x = PADDING; x < WIDTH - PADDING; x += 5) {
+              for (let y = PADDING; y < HEIGHT - PADDING; y += 5) {
+                ctx.fillStyle = predict(x, y) > 0 ? 'rgba(239, 68, 68, 0.1)' : 'rgba(59, 130, 246, 0.1)';
+                ctx.fillRect(x, y, 5, 5);
+              }
+            }
+
+            ctx.strokeStyle = '#2563eb';
+            ctx.lineWidth = 3;
+            for (let x = PADDING; x < WIDTH - PADDING - 4; x += 4) {
+              for (let y = PADDING; y < HEIGHT - PADDING - 4; y += 4) {
+                const v = [predict(x, y), predict(x + 4, y), predict(x + 4, y + 4), predict(x, y + 4)];
+                const s = v.map(val => val >= 0 ? 1 : 0);
+                const cfg = s[0] * 8 + s[1] * 4 + s[2] * 2 + s[3];
+                if (cfg !== 0 && cfg !== 15) {
+                  ctx.beginPath();
+                  if (cfg === 1 || cfg === 14) {
+                    ctx.moveTo(x + 4 * Math.abs(v[0]) / (Math.abs(v[0]) + Math.abs(v[1])), y);
+                    ctx.lineTo(x, y + 4 * Math.abs(v[0]) / (Math.abs(v[0]) + Math.abs(v[3])));
+                  } else if (cfg === 3 || cfg === 12) {
+                    ctx.moveTo(x, y + 4 * Math.abs(v[0]) / (Math.abs(v[0]) + Math.abs(v[3])));
+                    ctx.lineTo(x + 4, y + 4 * Math.abs(v[1]) / (Math.abs(v[1]) + Math.abs(v[2])));
+                  }
+                  ctx.stroke();
+                }
+              }
+            }
+          } else if (svm.type === 'rbf') {
+            const { points: svmPoints, gamma } = svm;
+            const predictPoint = (x, y) => {
+              let redSum = 0, blueSum = 0;
+              svmPoints.forEach(p => {
+                const d = Math.pow(x - p.x, 2) + Math.pow(y - p.y, 2);
+                const sim = Math.exp(-gamma * d);
+                if (p.class === 1) redSum += sim;
+                else blueSum += sim;
+              });
+              const total = redSum + blueSum;
+              if (total === 0) return null;
+              const redProb = redSum / total;
+              return redProb - 0.5;
+            };
+
+            // 부드러운 그라데이션 렌더링
+            for (let x = PADDING; x < WIDTH - PADDING; x += 3) {
+              for (let y = PADDING; y < HEIGHT - PADDING; y += 3) {
+                const val = predictPoint(x, y);
+                if (val === null) continue;
+                
+                // 결정 경계로부터의 거리에 따른 알파값
+                // 경계(val=0)에서 가까우면 연하고, 멀면 진하게
+                const boundaryDist = Math.abs(val);
+                
+                // 가장 가까운 데이터 포인트까지의 실제 거리
+                let minDist = Infinity;
+                svmPoints.forEach(p => {
+                  const d = Math.sqrt(Math.pow(x - p.x, 2) + Math.pow(y - p.y, 2));
+                  minDist = Math.min(minDist, d);
+                });
+                
+                // 거리에 따른 감쇠 계산 (데이터 포인트에서 멀수록 연해짐)
+                const distanceDecay = Math.exp(-minDist / 80);
+                
+                // 경계로부터의 거리와 실제 거리를 모두 고려
+                const alpha = Math.min(0.7, 
+                  0.05 + // 기본 투명도
+                  boundaryDist * 0.4 + // 경계에서 멀수록 진하게
+                  distanceDecay * 0.5 // 데이터 포인트 근처에서 진하게
+                );
+                
+                ctx.fillStyle = val > 0 
+                  ? `rgba(239, 68, 68, ${alpha})`
+                  : `rgba(59, 130, 246, ${alpha})`;
+                ctx.fillRect(x, y, 3, 3);
+              }
+            }
+
+            ctx.strokeStyle = '#2563eb';
+            ctx.lineWidth = 3;
+            for (let x = PADDING; x < WIDTH - PADDING - 4; x += 4) {
+              for (let y = PADDING; y < HEIGHT - PADDING - 4; y += 4) {
+                const v = [];
+                let hasValue = false;
+                
+                // 4개의 코너 값 계산
+                for (let dx = 0; dx <= 4; dx += 4) {
+                  for (let dy = 0; dy <= 4; dy += 4) {
+                    const val = predictPoint(x + dx, y + dy);
+                    v.push(val !== null ? val : 0);
+                    if (val !== null) hasValue = true;
+                  }
+                }
+                
+                if (!hasValue) continue;
+                
+                // 부호 변화가 있는 곳에 경계선 그리기
+                const s = v.map(val => val >= 0 ? 1 : 0);
+                const cfg = s[0] * 8 + s[1] * 4 + s[2] * 2 + s[3];
+                
+                // 경계선이 지나가는 모든 경우 처리
+                if (cfg !== 0 && cfg !== 15) {
+                  ctx.beginPath();
+                  
+                  if (cfg === 1 || cfg === 14) {
+                    const t1 = Math.abs(v[0]) / (Math.abs(v[0]) + Math.abs(v[1]) + 0.001);
+                    const t2 = Math.abs(v[0]) / (Math.abs(v[0]) + Math.abs(v[3]) + 0.001);
+                    ctx.moveTo(x + 4 * t1, y);
+                    ctx.lineTo(x, y + 4 * t2);
+                  } else if (cfg === 2 || cfg === 13) {
+                    const t1 = Math.abs(v[2]) / (Math.abs(v[2]) + Math.abs(v[3]) + 0.001);
+                    const t2 = Math.abs(v[2]) / (Math.abs(v[2]) + Math.abs(v[1]) + 0.001);
+                    ctx.moveTo(x + 4 * t1, y + 4);
+                    ctx.lineTo(x + 4, y + 4 * t2);
+                  } else if (cfg === 3 || cfg === 12) {
+                    const t1 = Math.abs(v[0]) / (Math.abs(v[0]) + Math.abs(v[3]) + 0.001);
+                    const t2 = Math.abs(v[1]) / (Math.abs(v[1]) + Math.abs(v[2]) + 0.001);
+                    ctx.moveTo(x, y + 4 * t1);
+                    ctx.lineTo(x + 4, y + 4 * t2);
+                  } else if (cfg === 4 || cfg === 11) {
+                    const t1 = Math.abs(v[1]) / (Math.abs(v[1]) + Math.abs(v[0]) + 0.001);
+                    const t2 = Math.abs(v[1]) / (Math.abs(v[1]) + Math.abs(v[2]) + 0.001);
+                    ctx.moveTo(x + 4 * t1, y);
+                    ctx.lineTo(x + 4, y + 4 * t2);
+                  } else if (cfg === 6 || cfg === 9) {
+                    const t1 = Math.abs(v[0]) / (Math.abs(v[0]) + Math.abs(v[1]) + 0.001);
+                    const t2 = Math.abs(v[3]) / (Math.abs(v[3]) + Math.abs(v[2]) + 0.001);
+                    ctx.moveTo(x + 4 * t1, y);
+                    ctx.lineTo(x + 4 * t2, y + 4);
+                  } else if (cfg === 7 || cfg === 8) {
+                    const t1 = Math.abs(v[3]) / (Math.abs(v[3]) + Math.abs(v[0]) + 0.001);
+                    const t2 = Math.abs(v[3]) / (Math.abs(v[3]) + Math.abs(v[2]) + 0.001);
+                    ctx.moveTo(x, y + 4 * t1);
+                    ctx.lineTo(x + 4 * t2, y + 4);
+                  }
+                  
+                  ctx.stroke();
+                }
+              }
+            }
+          }
+        }
+
+        points.forEach(point => {
+          const isSV = svm?.supportVectors?.some(sv => Math.abs(sv.x - point.x) < 1 && Math.abs(sv.y - point.y) < 1);
+          ctx.beginPath();
+          ctx.arc(point.x, point.y, 10, 0, 2 * Math.PI);
+          ctx.fillStyle = point.class === 1 ? '#ef4444' : '#3b82f6';
+          ctx.fill();
+          ctx.strokeStyle = point.class === 1 ? '#991b1b' : '#1e40af';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+          if (isSV) {
+            ctx.beginPath();
+            ctx.arc(point.x, point.y, 14, 0, 2 * Math.PI);
+            ctx.strokeStyle = '#fbbf24';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+          }
+        });
+      }, [points, svm, kernelMode, polynomialDegree, rbfGamma]);
+
+      const handleClick = (e) => {
+        const rect = canvasRef.current.getBoundingClientRect();
+        const scaleX = WIDTH / rect.width;
+        const scaleY = HEIGHT / rect.height;
+        const x = (e.clientX - rect.left) * scaleX;
+        const y = (e.clientY - rect.top) * scaleY;
+        if (x >= PADDING && x <= WIDTH - PADDING && y >= PADDING && y <= HEIGHT - PADDING) {
+          setPoints([...points, { x, y, class: selectedClass }]);
+          setSvm(null);
+        }
+      };
+
+      const handleMouseMove = (e) => {
+        const rect = canvasRef.current.getBoundingClientRect();
+        const scaleX = WIDTH / rect.width;
+        const scaleY = HEIGHT / rect.height;
+        const mx = (e.clientX - rect.left) * scaleX;
+        const my = (e.clientY - rect.top) * scaleY;
+
+        let found = null;
+        for (let p of points) {
+          if (Math.hypot(mx - p.x, my - p.y) <= 12) {
+            found = p;
+            break;
+          }
+        }
+        setHovered(found);
+      };
+
+      const reset = () => {
+        setPoints(generateInitialData());
+        setSvm(null);
+        setSelectedClass(1);
+      };
+
+      const redCount = points.filter(p => p.class === 1).length;
+      const blueCount = points.filter(p => p.class === -1).length;
+
+      return (
+        <div className="max-w-6xl mx-auto bg-white rounded-2xl shadow-2xl overflow-hidden">
+          <div className="bg-gradient-to-r from-indigo-600 to-purple-600 p-6 text-white">
+            <div className="text-sm mb-2 text-indigo-100">부산진여자상업고등학교 인공지능기초 학습자료</div>
+            <h1 className="text-3xl font-bold mb-2">서포트 벡터 머신(SVM)이란 무엇일까?</h1>
+            <p className="text-indigo-100">최적의 경계선을 찾아 데이터를 분류하는 강력한 AI 알고리즘을 체험해보세요</p>
+          </div>
+
+          <div className="bg-gradient-to-r from-blue-50 to-indigo-50 p-6 border-b border-indigo-100">
+            <div className="space-y-3 text-gray-700">
+              <div>
+                <h3 className="font-bold text-indigo-900 text-lg mb-2">📚 SVM 알고리즘이란?</h3>
+                <p className="leading-relaxed">
+                  SVM은 두 그룹을 <span className="font-bold text-blue-600">가장 멀리 떨어뜨리는 경계선</span>을 찾는 알고리즘이에요. 
+                  예를 들어, 축구를 좋아하는 학생들과 농구를 좋아하는 학생들을 나눌 때, 
+                  양쪽 그룹에서 <span className="font-bold text-yellow-600">가장 가까운 학생들(서포트 벡터)</span>과의 거리가 
+                  <span className="font-bold text-green-600">최대한 멀어지는 중간선</span>을 찾는 것과 같아요!
+                </p>
+              </div>
+              
+              <div className="grid md:grid-cols-3 gap-4 mt-4">
+                <div className="bg-white p-4 rounded-lg shadow-sm">
+                  <h4 className="font-bold text-indigo-700 mb-2">1️⃣ 데이터 추가</h4>
+                  <p className="text-sm">클래스 A 또는 클래스 B 버튼을 선택한 후 캔버스를 클릭하여 학습 데이터를 추가합니다.</p>
+                </div>
+                <div className="bg-white p-4 rounded-lg shadow-sm">
+                  <h4 className="font-bold text-green-700 mb-2">2️⃣ 커널 선택</h4>
+                  <p className="text-sm">직선, 다항식, RBF 중 하나를 선택하여 다양한 형태의 경계선을 만들 수 있습니다.</p>
+                </div>
+                <div className="bg-white p-4 rounded-lg shadow-sm">
+                  <h4 className="font-bold text-purple-700 mb-2">3️⃣ 학습 실행</h4>
+                  <p className="text-sm">'학습 시작!' 버튼을 클릭하면 AI가 최적의 결정 경계와 서포트 벡터를 찾아냅니다.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="p-6">
+            <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+              <div className="space-y-4">
+                <div className="bg-indigo-50 p-4 rounded-lg border border-indigo-200">
+                  <h3 className="font-bold text-indigo-900 mb-3 flex items-center gap-2">
+                    <span className="text-xl">⚙️</span>
+                    <span>커널 설정</span>
+                  </h3>
+                  
+                  <div className="space-y-2">
+                    <button onClick={() => { setKernelMode('linear'); setSvm(null); }}
+                      className={`w-full py-2 px-3 rounded-lg font-medium transition-all ${kernelMode === 'linear' ? 'bg-purple-500 text-white shadow-md' : 'bg-purple-100 text-purple-700 hover:bg-purple-200'}`}>
+                      직선 커널
+                    </button>
+                    <button onClick={() => { setKernelMode('polynomial'); setSvm(null); }}
+                      className={`w-full py-2 px-3 rounded-lg font-medium transition-all ${kernelMode === 'polynomial' ? 'bg-purple-500 text-white shadow-md' : 'bg-purple-100 text-purple-700 hover:bg-purple-200'}`}>
+                      다항식 커널
+                    </button>
+                    <button onClick={() => { setKernelMode('rbf'); setSvm(null); }}
+                      className={`w-full py-2 px-3 rounded-lg font-medium transition-all ${kernelMode === 'rbf' ? 'bg-purple-500 text-white shadow-md' : 'bg-purple-100 text-purple-700 hover:bg-purple-200'}`}>
+                      RBF 커널
+                    </button>
+                  </div>
+
+                  {kernelMode === 'polynomial' && (
+                    <div className="mt-3">
+                      <label className="text-sm text-gray-600 block mb-1">차수: {polynomialDegree}</label>
+                      <input type="range" min="2" max="3" value={polynomialDegree} 
+                        onChange={(e) => { setPolynomialDegree(parseInt(e.target.value)); setSvm(null); }} 
+                        className="w-full" />
+                      <p className="text-xs text-gray-500 mt-1">*차수가 높을수록 복잡한 곡선 가능</p>
+                    </div>
+                  )}
+                  {kernelMode === 'rbf' && (
+                    <div className="mt-3">
+                      <label className="text-sm text-gray-600 block mb-1">γ (감마): {rbfGamma.toFixed(2)}</label>
+                      <input type="range" min="0.1" max="2" step="0.1" value={rbfGamma} 
+                        onChange={(e) => { setRbfGamma(parseFloat(e.target.value)); setSvm(null); }} 
+                        className="w-full" />
+                      <p className="text-xs text-gray-500 mt-1">*값이 클수록 경계가 복잡해짐</p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="bg-green-50 p-4 rounded-lg border border-green-200">
+                  <h3 className="font-bold text-green-900 mb-3 flex items-center gap-2">
+                    <span className="text-xl">📊</span>
+                    <span>데이터 입력</span>
+                  </h3>
+                  <div className="space-y-2">
+                    <button onClick={() => setSelectedClass(1)}
+                      className={`w-full p-3 rounded-lg font-semibold transition-all ${selectedClass === 1 ? 'bg-red-500 text-white shadow-lg scale-105' : 'bg-white text-red-600 border-2 border-red-300 hover:bg-red-50'}`}>
+                      클래스 A 추가
+                    </button>
+                    <button onClick={() => setSelectedClass(-1)}
+                      className={`w-full p-3 rounded-lg font-semibold transition-all ${selectedClass === -1 ? 'bg-blue-500 text-white shadow-lg scale-105' : 'bg-white text-blue-600 border-2 border-blue-300 hover:bg-blue-50'}`}>
+                      클래스 B 추가
+                    </button>
+                  </div>
+                </div>
+
+                <div className="bg-orange-50 p-4 rounded-lg border border-orange-200">
+                  <h3 className="font-bold text-orange-900 mb-3 flex items-center gap-2">
+                    <span className="text-xl">🎮</span>
+                    <span>동작</span>
+                  </h3>
+                  <div className="space-y-2">
+                    <button onClick={handleTrain} disabled={points.length < 2}
+                      className="w-full bg-green-500 text-white py-3 rounded-lg font-semibold hover:bg-green-600 disabled:bg-gray-300 disabled:cursor-not-allowed transition-all">
+                      학습 시작!
+                    </button>
+                    <button onClick={() => { setPoints([]); setSvm(null); }}
+                      className="w-full bg-orange-500 text-white py-3 rounded-lg font-semibold hover:bg-orange-600 transition-all">
+                      모두 지우기
+                    </button>
+                    <button onClick={reset}
+                      className="w-full bg-gray-500 text-white py-3 rounded-lg font-semibold hover:bg-gray-600 transition-all">
+                      초기화
+                    </button>
+                  </div>
+                </div>
+
+                <div className="bg-pink-50 p-4 rounded-lg border border-pink-200">
+                  <h3 className="font-bold text-pink-900 mb-3 flex items-center gap-2">
+                    <span className="text-xl">📈</span>
+                    <span>데이터 현황</span>
+                  </h3>
+                  <div className="space-y-2 text-sm">
+                    <div className="flex justify-between items-center p-2 bg-white rounded">
+                      <span className="font-medium">클래스 A:</span>
+                      <span className="font-bold text-red-600">{redCount}개</span>
+                    </div>
+                    <div className="flex justify-between items-center p-2 bg-white rounded">
+                      <span className="font-medium">클래스 B:</span>
+                      <span className="font-bold text-blue-600">{blueCount}개</span>
+                    </div>
+                    <div className="flex justify-between items-center p-2 bg-white rounded">
+                      <span className="font-medium">전체:</span>
+                      <span className="font-bold">{points.length}개</span>
+                    </div>
+                    {svm && svm.supportVectors && (
+                      <div className="flex justify-between items-center p-2 bg-yellow-100 rounded">
+                        <span className="font-medium">서포트 벡터:</span>
+                        <span className="font-bold text-yellow-700">{svm.supportVectors.length}개</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="lg:col-span-3 space-y-4">
+                <div className="bg-gray-50 p-4 rounded-lg border border-gray-200">
+                  <h3 className="font-bold text-gray-900 mb-3 flex items-center gap-2">
+                    <span className="text-xl">🎯</span>
+                    <span>2차원 특성 공간</span>
+                  </h3>
+                  <div className="relative bg-white rounded-lg shadow-inner overflow-hidden border-2 border-gray-300">
+                    <canvas ref={canvasRef} width={WIDTH} height={HEIGHT} 
+                      onClick={handleClick} onMouseMove={handleMouseMove} 
+                      onMouseLeave={() => setHovered(null)}
+                      className="block w-full cursor-crosshair" />
+                    {hovered && (
+                      <div className="absolute bg-gray-900 text-white text-xs px-3 py-1 rounded-md pointer-events-none shadow-lg"
+                        style={{ left: hovered.x + 15, top: hovered.y - 10 }}>
+                        {hovered.class === 1 ? '클래스 A' : '클래스 B'}
+                      </div>
+                    )}
+                  </div>
+
+                  {svm && (
+                    <div className="mt-4 bg-gradient-to-r from-green-50 to-emerald-50 p-5 rounded-lg border-2 border-green-400">
+                      <h3 className="text-xl font-bold text-green-800 mb-3 flex items-center gap-2">
+                        <span>✅</span>
+                        <span>학습 완료!</span>
+                      </h3>
+                      <div className="space-y-3">
+                        <div className="bg-white p-4 rounded-lg shadow-sm">
+                          <p className="font-semibold text-gray-800 mb-2">
+                            🔍 {kernelMode === 'linear' ? '직선 커널' : kernelMode === 'polynomial' ? `다항식 커널 (${polynomialDegree}차)` : `RBF 커널 (γ=${rbfGamma.toFixed(2)})`}
+                          </p>
+                          <div className="space-y-2 text-sm text-gray-700">
+                            {kernelMode === 'linear' && (
+                              <>
+                                <p>• <span className="font-semibold text-blue-600">파란 실선</span>: 두 클래스를 나누는 결정 경계</p>
+                                <p>• <span className="font-semibold text-blue-400">파란 점선</span>: 마진 경계 (서포트 벡터와의 거리)</p>
+                                <p>• 두 점선 사이의 거리가 <span className="font-bold text-green-600">마진</span>입니다</p>
+                              </>
+                            )}
+                            {kernelMode === 'polynomial' && (
+                              <>
+                                <p>• <span className="font-semibold text-blue-600">파란 곡선</span>: 곡선 형태의 결정 경계</p>
+                                <p>• 타원, 포물선 등 복잡한 패턴 분류 가능</p>
+                                <p>• 배경색으로 각 영역의 소속 클래스 표시</p>
+                              </>
+                            )}
+                            {kernelMode === 'rbf' && (
+                              <>
+                                <p>• <span className="font-semibold text-blue-600">파란 곡선</span>: 자유로운 형태의 결정 경계</p>
+                                <p>• 점에서 멀어질수록 색이 연해지는 그라데이션 효과</p>
+                                <p>• 가장 복잡한 패턴도 분류 가능!</p>
+                              </>
+                            )}
+                            <p className="mt-2 pt-2 border-t border-gray-200">
+                              • <span className="inline-block w-3 h-3 rounded-full border-2 border-yellow-500 mr-1"></span>
+                              <span className="font-semibold text-yellow-600">노란 테두리</span>: 
+                              결정 경계에 가장 가까운 중요한 점들 (서포트 벡터)
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="bg-indigo-50 p-4 rounded-lg">
+                          <p className="text-sm font-semibold text-indigo-900 mb-2">💡 SVM의 핵심 아이디어</p>
+                          <p className="text-sm text-gray-700 leading-relaxed">
+                            SVM은 단순히 경계선을 그리는 것이 아니라, <span className="font-bold text-purple-600">양쪽 클래스와 최대한 멀리 떨어진 경계선</span>을 찾습니다. 
+                            이렇게 하면 새로운 데이터가 들어왔을 때도 정확하게 분류할 수 있어요! 
+                            <span className="font-bold text-yellow-600">서포트 벡터</span>는 이 경계선을 결정하는 데 가장 중요한 역할을 하는 점들입니다.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex justify-center gap-6 p-4 bg-gray-50 rounded-lg border border-gray-200">
+                  <div className="flex items-center gap-2">
+                    <div className="w-5 h-5 bg-red-500 rounded-full border-2 border-gray-800"></div>
+                    <span className="font-medium text-gray-700">클래스 A (축구반)</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="w-5 h-5 bg-blue-500 rounded-full border-2 border-gray-800"></div>
+                    <span className="font-medium text-gray-700">클래스 B (농구반)</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="w-5 h-5 bg-white rounded-full border-4 border-yellow-500"></div>
+                    <span className="font-medium text-gray-700">서포트 벡터</span>
+                  </div>
+                </div>
+
+                <div className="bg-gradient-to-r from-purple-50 to-pink-50 p-5 rounded-lg border border-purple-200">
+                  <h3 className="text-lg font-bold text-purple-900 mb-3">🧠 커널의 종류 이해하기</h3>
+                  <div className="grid md:grid-cols-3 gap-4">
+                    <div className="bg-white p-4 rounded-lg shadow-sm">
+                      <h4 className="font-bold text-purple-600 mb-2">직선 커널 📏</h4>
+                      <p className="text-sm text-gray-700">
+                        가장 단순한 형태예요. 데이터를 직선으로 나눌 수 있을 때 사용합니다. 
+                        빠르고 간단하지만, 복잡한 패턴은 분류하기 어려워요.
+                      </p>
+                    </div>
+                    <div className="bg-white p-4 rounded-lg shadow-sm">
+                      <h4 className="font-bold text-purple-600 mb-2">다항식 커널 📐</h4>
+                      <p className="text-sm text-gray-700">
+                        곡선으로 데이터를 나눌 수 있어요. 타원이나 포물선 같은 모양으로 
+                        경계를 만들 수 있어서 조금 더 복잡한 패턴을 분류할 수 있습니다.
+                      </p>
+                    </div>
+                    <div className="bg-white p-4 rounded-lg shadow-sm">
+                      <h4 className="font-bold text-purple-600 mb-2">RBF 커널 🎨</h4>
+                      <p className="text-sm text-gray-700">
+                        가장 유연한 형태예요! 점에서 가까울수록 영향이 크고, 멀수록 
+                        영향이 작아지는 원리로 아주 복잡한 패턴도 분류할 수 있어요.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<SVMDemo />);
+  </script>
+</body>
+</html>

@@ -4,12 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>SVM 알고리즘</title>
-
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
-
   <style>
     body { 
       font-family: 'Malgun Gothic', sans-serif; 
@@ -22,9 +20,8 @@
 </head>
 <body>
   <div id="root"></div>
-
   <script type="text/babel">
-    const { useState, useEffect, useRef } = React;
+    const { useState, useEffect, useRef, useCallback } = React;
 
     const SVMDemo = () => {
       const canvasRef = useRef(null);
@@ -51,15 +48,19 @@
         return initialPoints;
       };
 
+      const [showSVTooltip, setShowSVTooltip] = useState(false);
       const [points, setPoints] = useState(generateInitialData());
       const [selectedClass, setSelectedClass] = useState(1);
       const [kernelMode, setKernelMode] = useState('linear');
       const [polynomialDegree, setPolynomialDegree] = useState(2);
       const [rbfGamma, setRbfGamma] = useState(0.5);
+      const [sigmoidAlpha, setSigmoidAlpha] = useState(0.01);
+      const [sigmoidC0, setSigmoidC0] = useState(0);
+      const [costC, setCostC] = useState(1.0);
       const [svm, setSvm] = useState(null);
       const [hovered, setHovered] = useState(null);
 
-      const trainLinearSVM = () => {
+      const trainLinearSVM = useCallback(() => {
         if (points.length < 2) return null;
         const class1Points = points.filter(p => p.class === 1);
         const class2Points = points.filter(p => p.class === -1);
@@ -92,17 +93,7 @@
 
             if (margin > bestMargin) {
               bestMargin = margin;
-              const supportVectors = [];
-              const maxValue = Math.max(...proj1.map(p => p.value));
-              const minValue = Math.min(...proj2.map(p => p.value));
-              
-              proj1.forEach(p => {
-                if (Math.abs(p.value - maxValue) < 0.1) supportVectors.push(p.point);
-              });
-              proj2.forEach(p => {
-                if (Math.abs(p.value - minValue) < 0.1) supportVectors.push(p.point);
-              });
-              bestParams = { a, b, c, margin, supportVectors };
+              bestParams = { a, b, c, margin, boundary };
             }
           }
         }
@@ -124,30 +115,62 @@
           const a = dy / norm;
           const b = -dx / norm;
           const c = -(a * midX + b * midY);
-          let minDist = Infinity;
+          
+          const minDist = Math.min(
+            ...points.map(p => Math.abs(a * p.x + b * p.y + c))
+          );
+          
+          bestParams = { a, b, c, margin: minDist, boundary: 0 };
+        }
+
+        if (bestParams) {
+          const { a, b, c } = bestParams;
+          
+          // Cost에 따른 마진 조정: 높은 C = 좁은 마진, 낮은 C = 넓은 마진
+          const marginWidth = bestParams.margin * Math.max(0.3, 3 / costC);
+          
+          // 경계선으로부터의 거리 계산하여 서포트 벡터 선택
+          const distances = points.map(p => ({
+            point: p,
+            dist: Math.abs(a * p.x + b * p.y + c),
+            signedDist: (a * p.x + b * p.y + c) * p.class
+          }));
+          
+          // 마진 내부에 있거나 경계에 가까운 점들을 서포트 벡터로 선택
           const supportVectors = [];
-          points.forEach(p => {
-            const dist = Math.abs(a * p.x + b * p.y + c);
-            if (dist < minDist + 0.1) {
-              if (dist < minDist) {
-                minDist = dist;
-                supportVectors.length = 0;
-              }
-              supportVectors.push(p);
+          const threshold = marginWidth * 1.1; // 마진보다 약간 여유있게
+          
+          distances.forEach(d => {
+            // 경계선에 가까운 점들 (마진 내부 또는 경계 근처)
+            if (d.dist <= threshold) {
+              supportVectors.push(d.point);
             }
           });
-          bestParams = { a, b, c, margin: minDist, supportVectors };
+          
+          // 서포트 벡터가 너무 적으면 가장 가까운 점들 추가
+          if (supportVectors.length < 2) {
+            const sorted = [...distances].sort((a, b) => a.dist - b.dist);
+            const numToAdd = Math.max(2, Math.min(6, Math.ceil(8 / costC)));
+            for (let i = 0; i < numToAdd && i < sorted.length; i++) {
+              if (!supportVectors.includes(sorted[i].point)) {
+                supportVectors.push(sorted[i].point);
+              }
+            }
+          }
+          
+          bestParams.supportVectors = supportVectors;
+          bestParams.adjustedMargin = marginWidth;
         }
-        return bestParams;
-      };
 
-      const trainPolynomialSVM = () => {
+        return bestParams;
+      }, [points, costC]);
+
+      const trainPolynomialSVM = useCallback(() => {
         if (points.length < 2) return null;
         const class1Points = points.filter(p => p.class === 1);
         const class2Points = points.filter(p => p.class === -1);
         if (class1Points.length === 0 || class2Points.length === 0) return null;
 
-        // 실제 데이터의 중심점 계산
         const allX = points.map(p => p.x);
         const allY = points.map(p => p.y);
         const centerX = (Math.max(...allX) + Math.min(...allX)) / 2;
@@ -171,39 +194,219 @@
           original: p
         }));
 
-        let weights = Array(transformedData[0].features.length).fill(0).map(() => (Math.random() - 0.5) * 0.1);
-        for (let epoch = 0; epoch < 200; epoch++) {
+        let weights = Array(transformedData[0].features.length).fill(0);
+        const learningRate = 0.01 * costC;
+        const maxEpochs = 500;
+        
+        for (let epoch = 0; epoch < maxEpochs; epoch++) {
           let errors = 0;
+          let totalLoss = 0;
+          
           transformedData.forEach(d => {
-            const prediction = weights.reduce((sum, w, i) => sum + w * d.features[i], 0);
-            if ((prediction >= 0 ? 1 : -1) !== d.class) {
+            const score = weights.reduce((sum, w, i) => sum + w * d.features[i], 0);
+            const margin = d.class * score;
+            
+            if (margin < 1) {
               errors++;
+              totalLoss += (1 - margin);
               for (let i = 0; i < weights.length; i++) {
-                weights[i] += 0.1 * d.class * d.features[i];
+                weights[i] += learningRate * (d.class * d.features[i] - 0.01 * weights[i] / costC);
+              }
+            } else {
+              for (let i = 0; i < weights.length; i++) {
+                weights[i] -= learningRate * 0.01 * weights[i] / costC;
               }
             }
           });
-          if (errors === 0) break;
+          
+          if (errors === 0 && epoch > 50) break;
+          if (totalLoss < 0.01) break;
         }
 
         const supportVectors = [];
+        const threshold = Math.max(0.3, 2.0 / (1 + costC * 0.3));
         transformedData.forEach(d => {
           const value = weights.reduce((sum, w, i) => sum + w * d.features[i], 0);
-          if (Math.abs(value) < 0.5) supportVectors.push(d.original);
+          const margin = Math.abs(d.class * value);
+          if (margin < threshold) supportVectors.push(d.original);
         });
 
-        return { weights, supportVectors, degree: polynomialDegree, centerX, centerY, scale };
-      };
+        if (supportVectors.length === 0) {
+          const margins = transformedData.map(d => ({
+            margin: Math.abs(d.class * weights.reduce((sum, w, i) => sum + w * d.features[i], 0)),
+            original: d.original
+          })).sort((a, b) => a.margin - b.margin);
+          
+          const class1SVs = margins.filter(m => m.original.class === 1).slice(0, Math.max(1, Math.floor(margins.length * 0.1)));
+          const class2SVs = margins.filter(m => m.original.class === -1).slice(0, Math.max(1, Math.floor(margins.length * 0.1)));
+          supportVectors.push(...class1SVs.map(m => m.original), ...class2SVs.map(m => m.original));
+        }
 
-      const trainRBFSVM = () => {
+        return { weights, supportVectors, degree: polynomialDegree, centerX, centerY, scale };
+      }, [points, polynomialDegree, costC]);
+
+      const trainRBFSVM = useCallback(() => {
         if (points.length < 2) return null;
         const class1Points = points.filter(p => p.class === 1);
         const class2Points = points.filter(p => p.class === -1);
         if (class1Points.length === 0 || class2Points.length === 0) return null;
-        return { points: [...points], gamma: rbfGamma, supportVectors: [...points] };
-      };
+        
+        const supportVectors = [];
+        const threshold = Math.max(0.3, 1.5 / (1 + costC * 0.2));
+        
+        points.forEach(point => {
+          const oppositePoints = points.filter(p => p.class !== point.class);
+          const minDist = Math.min(...oppositePoints.map(p => 
+            Math.sqrt(Math.pow(point.x - p.x, 2) + Math.pow(point.y - p.y, 2))
+          ));
+          
+          if (minDist < 200 / costC) {
+            supportVectors.push(point);
+          }
+        });
+        
+        if (supportVectors.length === 0) {
+          const class1Closest = class1Points.sort((a, b) => {
+            const aDist = Math.min(...class2Points.map(p => Math.hypot(a.x - p.x, a.y - p.y)));
+            const bDist = Math.min(...class2Points.map(p => Math.hypot(b.x - p.x, b.y - p.y)));
+            return aDist - bDist;
+          }).slice(0, 2);
+          
+          const class2Closest = class2Points.sort((a, b) => {
+            const aDist = Math.min(...class1Points.map(p => Math.hypot(a.x - p.x, a.y - p.y)));
+            const bDist = Math.min(...class1Points.map(p => Math.hypot(b.x - p.x, b.y - p.y)));
+            return aDist - bDist;
+          }).slice(0, 2);
+          
+          supportVectors.push(...class1Closest, ...class2Closest);
+        }
+        
+        return { points: [...points], gamma: rbfGamma, supportVectors };
+      }, [points, rbfGamma, costC]);
 
-      const handleTrain = () => {
+      const trainSigmoidSVM = useCallback(() => {
+        if (points.length < 2) return null;
+        const class1Points = points.filter(p => p.class === 1);
+        const class2Points = points.filter(p => p.class === -1);
+        if (class1Points.length === 0 || class2Points.length === 0) return null;
+
+        const allX = points.map(p => p.x);
+        const allY = points.map(p => p.y);
+        const centerX = (Math.max(...allX) + Math.min(...allX)) / 2;
+        const centerY = (Math.max(...allY) + Math.min(...allY)) / 2;
+        const scale = Math.max(
+          Math.max(...allX) - Math.min(...allX),
+          Math.max(...allY) - Math.min(...allY)
+        ) / 2 + 10;
+
+        const normalizedPoints = points.map(p => ({
+          x: (p.x - centerX) / scale,
+          y: (p.y - centerY) / scale,
+          class: p.class,
+          original: p
+        }));
+
+        const numHidden = Math.min(8, points.length);
+        const hiddenCenters = [];
+        const step = Math.max(1, Math.floor(normalizedPoints.length / numHidden));
+        for (let i = 0; i < numHidden; i++) {
+          const idx = (i * step) % normalizedPoints.length;
+          hiddenCenters.push({
+            x: normalizedPoints[idx].x,
+            y: normalizedPoints[idx].y
+          });
+        }
+        
+        const hiddenWeights = hiddenCenters.map(() => (Math.random() - 0.5) * 0.1);
+        let bias = 0;
+        const learningRate = 0.1 * Math.sqrt(costC);
+        
+        for (let epoch = 0; epoch < 800; epoch++) {
+          let totalError = 0;
+          
+          normalizedPoints.forEach(p => {
+            let score = bias;
+            hiddenCenters.forEach((center, i) => {
+              const dx = p.x - center.x;
+              const dy = p.y - center.y;
+              const dist = Math.sqrt(dx * dx + dy * dy);
+              const activation = Math.tanh(sigmoidAlpha * (5 - dist * 10) + sigmoidC0);
+              score += hiddenWeights[i] * activation;
+            });
+            
+            const margin = p.class * score;
+            
+            if (margin < 1) {
+              totalError += (1 - margin);
+              hiddenCenters.forEach((center, i) => {
+                const dx = p.x - center.x;
+                const dy = p.y - center.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                const activation = Math.tanh(sigmoidAlpha * (5 - dist * 10) + sigmoidC0);
+                hiddenWeights[i] += learningRate * p.class * activation;
+              });
+              bias += learningRate * p.class * 0.1;
+            }
+            
+            hiddenWeights.forEach((w, i) => {
+              hiddenWeights[i] *= (1 - 0.001 / costC);
+            });
+          });
+          
+          if (totalError < 0.1 && epoch > 200) break;
+        }
+
+        const supportVectors = [];
+        const threshold = Math.max(0.5, 2.0 / (1 + costC * 0.3));
+        
+        normalizedPoints.forEach(p => {
+          let score = bias;
+          hiddenCenters.forEach((center, i) => {
+            const dx = p.x - center.x;
+            const dy = p.y - center.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            const activation = Math.tanh(sigmoidAlpha * (5 - dist * 10) + sigmoidC0);
+            score += hiddenWeights[i] * activation;
+          });
+          
+          const margin = Math.abs(p.class * score);
+          if (margin < threshold) {
+            supportVectors.push(p.original);
+          }
+        });
+
+        if (supportVectors.length === 0) {
+          const margins = normalizedPoints.map(p => {
+            let score = bias;
+            hiddenCenters.forEach((center, i) => {
+              const dx = p.x - center.x;
+              const dy = p.y - center.y;
+              const dist = Math.sqrt(dx * dx + dy * dy);
+              const activation = Math.tanh(sigmoidAlpha * (5 - dist * 10) + sigmoidC0);
+              score += hiddenWeights[i] * activation;
+            });
+            return {
+              margin: Math.abs(p.class * score),
+              original: p.original
+            };
+          }).sort((a, b) => a.margin - b.margin);
+          
+          const numSV = Math.max(2, Math.min(6, Math.ceil(points.length * 0.3 / costC)));
+          supportVectors.push(...margins.slice(0, numSV).map(m => m.original));
+        }
+
+        return {
+          hiddenCenters,
+          hiddenWeights,
+          bias,
+          alpha: sigmoidAlpha,
+          c0: sigmoidC0,
+          centerX, centerY, scale,
+          supportVectors
+        };
+      }, [points, sigmoidAlpha, sigmoidC0, costC]);
+
+      const handleTrain = useCallback(() => {
         if (kernelMode === 'linear') {
           const result = trainLinearSVM();
           setSvm(result ? { ...result, type: 'linear' } : null);
@@ -213,8 +416,27 @@
         } else if (kernelMode === 'rbf') {
           const result = trainRBFSVM();
           setSvm(result ? { ...result, type: 'rbf' } : null);
+        } else if (kernelMode === 'sigmoid') {
+          const result = trainSigmoidSVM();
+          setSvm(result ? { ...result, type: 'sigmoid' } : null);
         }
-      };
+      }, [kernelMode, trainLinearSVM, trainPolynomialSVM, trainRBFSVM, trainSigmoidSVM]);
+
+      useEffect(() => {
+        if (svm && points.length >= 2) handleTrain();
+      }, [costC]);
+
+      useEffect(() => {
+        if (svm && points.length >= 2 && kernelMode === 'rbf') handleTrain();
+      }, [rbfGamma]);
+
+      useEffect(() => {
+        if (svm && points.length >= 2 && kernelMode === 'polynomial') handleTrain();
+      }, [polynomialDegree]);
+
+      useEffect(() => {
+        if (svm && points.length >= 2 && kernelMode === 'sigmoid') handleTrain();
+      }, [sigmoidAlpha, sigmoidC0]);
 
       useEffect(() => {
         const canvas = canvasRef.current;
@@ -239,7 +461,9 @@
 
         if (svm) {
           if (svm.type === 'linear') {
-            const { a, b, c, margin } = svm;
+            const { a, b, c, adjustedMargin } = svm;
+            const margin = adjustedMargin || svm.margin;
+            
             const drawLine = (offset, style, width, dash = []) => {
               ctx.strokeStyle = style;
               ctx.lineWidth = width;
@@ -259,7 +483,8 @@
               }
               ctx.stroke();
             };
-            drawLine(0, '#2563eb', 3);
+            
+            drawLine(0, '#16a34a', 3);
             drawLine(-margin, '#93c5fd', 2, [5, 5]);
             drawLine(margin, '#93c5fd', 2, [5, 5]);
             ctx.setLineDash([]);
@@ -281,7 +506,7 @@
               }
             }
 
-            ctx.strokeStyle = '#2563eb';
+            ctx.strokeStyle = '#16a34a';
             ctx.lineWidth = 3;
             for (let x = PADDING; x < WIDTH - PADDING - 4; x += 4) {
               for (let y = PADDING; y < HEIGHT - PADDING - 4; y += 4) {
@@ -304,44 +529,30 @@
           } else if (svm.type === 'rbf') {
             const { points: svmPoints, gamma } = svm;
             const predictPoint = (x, y) => {
-              let redSum = 0, blueSum = 0;
+              let score = 0;
               svmPoints.forEach(p => {
                 const d = Math.pow(x - p.x, 2) + Math.pow(y - p.y, 2);
-                const sim = Math.exp(-gamma * d);
-                if (p.class === 1) redSum += sim;
-                else blueSum += sim;
+                const sim = Math.exp(-gamma * d / 10000);
+                score += p.class * sim;
               });
-              const total = redSum + blueSum;
-              if (total === 0) return null;
-              const redProb = redSum / total;
-              return redProb - 0.5;
+              return score;
             };
 
-            // 부드러운 그라데이션 렌더링
             for (let x = PADDING; x < WIDTH - PADDING; x += 3) {
               for (let y = PADDING; y < HEIGHT - PADDING; y += 3) {
                 const val = predictPoint(x, y);
-                if (val === null) continue;
-                
-                // 결정 경계로부터의 거리에 따른 알파값
-                // 경계(val=0)에서 가까우면 연하고, 멀면 진하게
                 const boundaryDist = Math.abs(val);
-                
-                // 가장 가까운 데이터 포인트까지의 실제 거리
                 let minDist = Infinity;
                 svmPoints.forEach(p => {
                   const d = Math.sqrt(Math.pow(x - p.x, 2) + Math.pow(y - p.y, 2));
                   minDist = Math.min(minDist, d);
                 });
                 
-                // 거리에 따른 감쇠 계산 (데이터 포인트에서 멀수록 연해짐)
                 const distanceDecay = Math.exp(-minDist / 80);
-                
-                // 경계로부터의 거리와 실제 거리를 모두 고려
                 const alpha = Math.min(0.7, 
-                  0.05 + // 기본 투명도
-                  boundaryDist * 0.4 + // 경계에서 멀수록 진하게
-                  distanceDecay * 0.5 // 데이터 포인트 근처에서 진하게
+                  0.05 + 
+                  Math.min(0.4, boundaryDist * 0.1) + 
+                  distanceDecay * 0.5
                 );
                 
                 ctx.fillStyle = val > 0 
@@ -351,64 +562,108 @@
               }
             }
 
-            ctx.strokeStyle = '#2563eb';
+            ctx.strokeStyle = '#16a34a';
             ctx.lineWidth = 3;
             for (let x = PADDING; x < WIDTH - PADDING - 4; x += 4) {
               for (let y = PADDING; y < HEIGHT - PADDING - 4; y += 4) {
-                const v = [];
-                let hasValue = false;
+                const v = [
+                  predictPoint(x, y),
+                  predictPoint(x + 4, y),
+                  predictPoint(x + 4, y + 4),
+                  predictPoint(x, y + 4)
+                ];
                 
-                // 4개의 코너 값 계산
-                for (let dx = 0; dx <= 4; dx += 4) {
-                  for (let dy = 0; dy <= 4; dy += 4) {
-                    const val = predictPoint(x + dx, y + dy);
-                    v.push(val !== null ? val : 0);
-                    if (val !== null) hasValue = true;
-                  }
-                }
-                
-                if (!hasValue) continue;
-                
-                // 부호 변화가 있는 곳에 경계선 그리기
                 const s = v.map(val => val >= 0 ? 1 : 0);
                 const cfg = s[0] * 8 + s[1] * 4 + s[2] * 2 + s[3];
                 
-                // 경계선이 지나가는 모든 경우 처리
                 if (cfg !== 0 && cfg !== 15) {
                   ctx.beginPath();
+                  const t1 = Math.abs(v[0]) / (Math.abs(v[0]) + Math.abs(v[1]) + 0.001);
+                  const t2 = Math.abs(v[0]) / (Math.abs(v[0]) + Math.abs(v[3]) + 0.001);
+                  const t3 = Math.abs(v[2]) / (Math.abs(v[2]) + Math.abs(v[3]) + 0.001);
+                  const t4 = Math.abs(v[2]) / (Math.abs(v[2]) + Math.abs(v[1]) + 0.001);
+                  const t5 = Math.abs(v[1]) / (Math.abs(v[1]) + Math.abs(v[0]) + 0.001);
+                  const t6 = Math.abs(v[1]) / (Math.abs(v[1]) + Math.abs(v[2]) + 0.001);
+                  const t7 = Math.abs(v[3]) / (Math.abs(v[3]) + Math.abs(v[0]) + 0.001);
+                  const t8 = Math.abs(v[3]) / (Math.abs(v[3]) + Math.abs(v[2]) + 0.001);
                   
-                  if (cfg === 1 || cfg === 14) {
-                    const t1 = Math.abs(v[0]) / (Math.abs(v[0]) + Math.abs(v[1]) + 0.001);
-                    const t2 = Math.abs(v[0]) / (Math.abs(v[0]) + Math.abs(v[3]) + 0.001);
-                    ctx.moveTo(x + 4 * t1, y);
-                    ctx.lineTo(x, y + 4 * t2);
-                  } else if (cfg === 2 || cfg === 13) {
-                    const t1 = Math.abs(v[2]) / (Math.abs(v[2]) + Math.abs(v[3]) + 0.001);
-                    const t2 = Math.abs(v[2]) / (Math.abs(v[2]) + Math.abs(v[1]) + 0.001);
-                    ctx.moveTo(x + 4 * t1, y + 4);
-                    ctx.lineTo(x + 4, y + 4 * t2);
-                  } else if (cfg === 3 || cfg === 12) {
-                    const t1 = Math.abs(v[0]) / (Math.abs(v[0]) + Math.abs(v[3]) + 0.001);
-                    const t2 = Math.abs(v[1]) / (Math.abs(v[1]) + Math.abs(v[2]) + 0.001);
-                    ctx.moveTo(x, y + 4 * t1);
-                    ctx.lineTo(x + 4, y + 4 * t2);
-                  } else if (cfg === 4 || cfg === 11) {
-                    const t1 = Math.abs(v[1]) / (Math.abs(v[1]) + Math.abs(v[0]) + 0.001);
-                    const t2 = Math.abs(v[1]) / (Math.abs(v[1]) + Math.abs(v[2]) + 0.001);
-                    ctx.moveTo(x + 4 * t1, y);
-                    ctx.lineTo(x + 4, y + 4 * t2);
-                  } else if (cfg === 6 || cfg === 9) {
-                    const t1 = Math.abs(v[0]) / (Math.abs(v[0]) + Math.abs(v[1]) + 0.001);
-                    const t2 = Math.abs(v[3]) / (Math.abs(v[3]) + Math.abs(v[2]) + 0.001);
-                    ctx.moveTo(x + 4 * t1, y);
-                    ctx.lineTo(x + 4 * t2, y + 4);
-                  } else if (cfg === 7 || cfg === 8) {
-                    const t1 = Math.abs(v[3]) / (Math.abs(v[3]) + Math.abs(v[0]) + 0.001);
-                    const t2 = Math.abs(v[3]) / (Math.abs(v[3]) + Math.abs(v[2]) + 0.001);
-                    ctx.moveTo(x, y + 4 * t1);
-                    ctx.lineTo(x + 4 * t2, y + 4);
+                  switch(cfg) {
+                    case 1: case 14: ctx.moveTo(x + 4 * t1, y); ctx.lineTo(x, y + 4 * t2); break;
+                    case 2: case 13: ctx.moveTo(x + 4 * t3, y + 4); ctx.lineTo(x + 4, y + 4 * t4); break;
+                    case 3: case 12: ctx.moveTo(x, y + 4 * t2); ctx.lineTo(x + 4, y + 4 * t6); break;
+                    case 4: case 11: ctx.moveTo(x + 4 * t5, y); ctx.lineTo(x + 4, y + 4 * t6); break;
+                    case 6: case 9: ctx.moveTo(x + 4 * t1, y); ctx.lineTo(x + 4 * t8, y + 4); break;
+                    case 7: case 8: ctx.moveTo(x, y + 4 * t7); ctx.lineTo(x + 4 * t8, y + 4); break;
                   }
+                  ctx.stroke();
+                }
+              }
+            }
+          } else if (svm.type === 'sigmoid') {
+            const { hiddenCenters, hiddenWeights, bias, alpha, c0, centerX, centerY, scale } = svm;
+            
+            const predict = (x, y) => {
+              const nx = (x - centerX) / scale;
+              const ny = (y - centerY) / scale;
+              
+              let score = bias;
+              hiddenCenters.forEach((center, i) => {
+                const dx = nx - center.x;
+                const dy = ny - center.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                const activation = Math.tanh(alpha * (5 - dist * 10) + c0);
+                score += hiddenWeights[i] * activation;
+              });
+              
+              return score;
+            };
+
+            for (let x = PADDING; x < WIDTH - PADDING; x += 3) {
+              for (let y = PADDING; y < HEIGHT - PADDING; y += 3) {
+                const val = predict(x, y);
+                const boundaryDist = Math.abs(val);
+                const alpha = Math.min(0.25, 0.03 + boundaryDist * 0.12);
+                
+                ctx.fillStyle = val > 0 
+                  ? `rgba(239, 68, 68, ${alpha})`
+                  : `rgba(59, 130, 246, ${alpha})`;
+                ctx.fillRect(x, y, 3, 3);
+              }
+            }
+
+            ctx.strokeStyle = '#16a34a';
+            ctx.lineWidth = 3;
+            for (let x = PADDING; x < WIDTH - PADDING - 4; x += 4) {
+              for (let y = PADDING; y < HEIGHT - PADDING - 4; y += 4) {
+                const v = [
+                  predict(x, y),
+                  predict(x + 4, y),
+                  predict(x + 4, y + 4),
+                  predict(x, y + 4)
+                ];
+                
+                const s = v.map(val => val >= 0 ? 1 : 0);
+                const cfg = s[0] * 8 + s[1] * 4 + s[2] * 2 + s[3];
+                
+                if (cfg !== 0 && cfg !== 15) {
+                  ctx.beginPath();
+                  const t1 = Math.abs(v[0]) / (Math.abs(v[0]) + Math.abs(v[1]) + 0.001);
+                  const t2 = Math.abs(v[0]) / (Math.abs(v[0]) + Math.abs(v[3]) + 0.001);
+                  const t3 = Math.abs(v[2]) / (Math.abs(v[2]) + Math.abs(v[3]) + 0.001);
+                  const t4 = Math.abs(v[2]) / (Math.abs(v[2]) + Math.abs(v[1]) + 0.001);
+                  const t5 = Math.abs(v[1]) / (Math.abs(v[1]) + Math.abs(v[0]) + 0.001);
+                  const t6 = Math.abs(v[1]) / (Math.abs(v[1]) + Math.abs(v[2]) + 0.001);
+                  const t7 = Math.abs(v[3]) / (Math.abs(v[3]) + Math.abs(v[0]) + 0.001);
+                  const t8 = Math.abs(v[3]) / (Math.abs(v[3]) + Math.abs(v[2]) + 0.001);
                   
+                  switch(cfg) {
+                    case 1: case 14: ctx.moveTo(x + 4 * t1, y); ctx.lineTo(x, y + 4 * t2); break;
+                    case 2: case 13: ctx.moveTo(x + 4 * t3, y + 4); ctx.lineTo(x + 4, y + 4 * t4); break;
+                    case 3: case 12: ctx.moveTo(x, y + 4 * t2); ctx.lineTo(x + 4, y + 4 * t6); break;
+                    case 4: case 11: ctx.moveTo(x + 4 * t5, y); ctx.lineTo(x + 4, y + 4 * t6); break;
+                    case 6: case 9: ctx.moveTo(x + 4 * t1, y); ctx.lineTo(x + 4 * t8, y + 4); break;
+                    case 7: case 8: ctx.moveTo(x, y + 4 * t7); ctx.lineTo(x + 4 * t8, y + 4); break;
+                  }
                   ctx.stroke();
                 }
               }
@@ -433,7 +688,7 @@
             ctx.stroke();
           }
         });
-      }, [points, svm, kernelMode, polynomialDegree, rbfGamma]);
+      }, [points, svm]);
 
       const handleClick = (e) => {
         const rect = canvasRef.current.getBoundingClientRect();
@@ -441,6 +696,7 @@
         const scaleY = HEIGHT / rect.height;
         const x = (e.clientX - rect.left) * scaleX;
         const y = (e.clientY - rect.top) * scaleY;
+        
         if (x >= PADDING && x <= WIDTH - PADDING && y >= PADDING && y <= HEIGHT - PADDING) {
           setPoints([...points, { x, y, class: selectedClass }]);
           setSvm(null);
@@ -487,23 +743,27 @@
                 <h3 className="font-bold text-indigo-900 text-lg mb-2">📚 SVM 알고리즘이란?</h3>
                 <p className="leading-relaxed">
                   SVM은 두 그룹을 <span className="font-bold text-blue-600">가장 멀리 떨어뜨리는 경계선</span>을 찾는 알고리즘이에요. 
-                  예를 들어, 축구를 좋아하는 학생들과 농구를 좋아하는 학생들을 나눌 때, 
+                  예를 들어, 배드민턴을 좋아하는 학생들과 댄스를 좋아하는 학생들을 나눌 때, 
                   양쪽 그룹에서 <span className="font-bold text-yellow-600">가장 가까운 학생들(서포트 벡터)</span>과의 거리가 
-                  <span className="font-bold text-green-600">최대한 멀어지는 중간선</span>을 찾는 것과 같아요!
+                  <span className="font-bold text-green-600"> 최대한 멀어지는 중간선</span>을 찾는 것과 같아요!
                 </p>
               </div>
               
-              <div className="grid md:grid-cols-3 gap-4 mt-4">
+              <div className="grid md:grid-cols-4 gap-4 mt-4">
                 <div className="bg-white p-4 rounded-lg shadow-sm">
                   <h4 className="font-bold text-indigo-700 mb-2">1️⃣ 데이터 추가</h4>
                   <p className="text-sm">클래스 A 또는 클래스 B 버튼을 선택한 후 캔버스를 클릭하여 학습 데이터를 추가합니다.</p>
                 </div>
                 <div className="bg-white p-4 rounded-lg shadow-sm">
                   <h4 className="font-bold text-green-700 mb-2">2️⃣ 커널 선택</h4>
-                  <p className="text-sm">직선, 다항식, RBF 중 하나를 선택하여 다양한 형태의 경계선을 만들 수 있습니다.</p>
+                  <p className="text-sm">직선, 다항식, RBF, 시그모이드 중 하나를 선택하여 다양한 형태의 경계선을 만들 수 있습니다.</p>
                 </div>
                 <div className="bg-white p-4 rounded-lg shadow-sm">
-                  <h4 className="font-bold text-purple-700 mb-2">3️⃣ 학습 실행</h4>
+                  <h4 className="font-bold text-orange-700 mb-2">3️⃣ Cost 조정</h4>
+                  <p className="text-sm">엄격함(높은 C) vs 유연함(낮은 C)을 조절하여 경계선이 데이터를 얼마나 정확히 따라갈지 결정합니다.</p>
+                </div>
+                <div className="bg-white p-4 rounded-lg shadow-sm">
+                  <h4 className="font-bold text-purple-700 mb-2">4️⃣ 학습 실행</h4>
                   <p className="text-sm">'학습 시작!' 버튼을 클릭하면 AI가 최적의 결정 경계와 서포트 벡터를 찾아냅니다.</p>
                 </div>
               </div>
@@ -532,26 +792,87 @@
                       className={`w-full py-2 px-3 rounded-lg font-medium transition-all ${kernelMode === 'rbf' ? 'bg-purple-500 text-white shadow-md' : 'bg-purple-100 text-purple-700 hover:bg-purple-200'}`}>
                       RBF 커널
                     </button>
+                    <button onClick={() => { setKernelMode('sigmoid'); setSvm(null); }}
+                      className={`w-full py-2 px-3 rounded-lg font-medium transition-all ${kernelMode === 'sigmoid' ? 'bg-purple-500 text-white shadow-md' : 'bg-purple-100 text-purple-700 hover:bg-purple-200'}`}>
+                      시그모이드 커널
+                    </button>
                   </div>
 
                   {kernelMode === 'polynomial' && (
                     <div className="mt-3">
-                      <label className="text-sm text-gray-600 block mb-1">차수: {polynomialDegree}</label>
+                      <label className="text-sm text-gray-600 block mb-1">
+                        차수: {polynomialDegree} {svm && <span className="text-green-600">✓ 적용됨</span>}
+                      </label>
                       <input type="range" min="2" max="3" value={polynomialDegree} 
-                        onChange={(e) => { setPolynomialDegree(parseInt(e.target.value)); setSvm(null); }} 
+                        onChange={(e) => { setPolynomialDegree(parseInt(e.target.value)); }} 
                         className="w-full" />
                       <p className="text-xs text-gray-500 mt-1">*차수가 높을수록 복잡한 곡선 가능</p>
                     </div>
                   )}
                   {kernelMode === 'rbf' && (
                     <div className="mt-3">
-                      <label className="text-sm text-gray-600 block mb-1">γ (감마): {rbfGamma.toFixed(2)}</label>
+                      <label className="text-sm text-gray-600 block mb-1">
+                        γ (감마): {rbfGamma.toFixed(2)} {svm && <span className="text-green-600">✓ 적용됨</span>}
+                      </label>
                       <input type="range" min="0.1" max="2" step="0.1" value={rbfGamma} 
-                        onChange={(e) => { setRbfGamma(parseFloat(e.target.value)); setSvm(null); }} 
+                        onChange={(e) => { setRbfGamma(parseFloat(e.target.value)); }} 
                         className="w-full" />
                       <p className="text-xs text-gray-500 mt-1">*값이 클수록 경계가 복잡해짐</p>
                     </div>
                   )}
+                  {kernelMode === 'sigmoid' && (
+                    <div className="mt-3 space-y-3">
+                      <div>
+                        <label className="text-sm text-gray-600 block mb-1">
+                          α (알파): {sigmoidAlpha.toFixed(3)} {svm && <span className="text-green-600">✓ 적용됨</span>}
+                        </label>
+                        <input type="range" min="0.001" max="0.1" step="0.001" value={sigmoidAlpha} 
+                          onChange={(e) => { setSigmoidAlpha(parseFloat(e.target.value)); }} 
+                          className="w-full" />
+                        <p className="text-xs text-gray-500 mt-1">*경계의 기울기 조절</p>
+                      </div>
+                      <div>
+                        <label className="text-sm text-gray-600 block mb-1">
+                          c₀ (상수): {sigmoidC0.toFixed(2)} {svm && <span className="text-green-600">✓ 적용됨</span>}
+                        </label>
+                        <input type="range" min="-2" max="2" step="0.1" value={sigmoidC0} 
+                          onChange={(e) => { setSigmoidC0(parseFloat(e.target.value)); }} 
+                          className="w-full" />
+                        <p className="text-xs text-gray-500 mt-1">*경계의 위치 조절</p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="bg-orange-50 p-4 rounded-lg border border-orange-200">
+                  <h3 className="font-bold text-orange-900 mb-3 flex items-center gap-2">
+                    <span className="text-xl">💪</span>
+                    <span>Cost (C) 파라미터</span>
+                  </h3>
+                  <div className="mb-3">
+                    <label className="text-sm text-gray-600 block mb-1">
+                      C 값: {costC.toFixed(1)} {svm && <span className="text-green-600">✓ 적용됨</span>}
+                    </label>
+                    <input 
+                      type="range" 
+                      min="0.1" 
+                      max="10" 
+                      step="0.1" 
+                      value={costC} 
+                      onChange={(e) => { setCostC(parseFloat(e.target.value)); }} 
+                      className="w-full" 
+                    />
+                  </div>
+                  <div className="bg-white p-3 rounded-lg text-xs space-y-2">
+                    <div className={`p-2 rounded ${costC >= 5 ? 'bg-red-100 border border-red-300' : 'bg-gray-50'}`}>
+                      <p className="font-semibold text-red-700">높은 C (엄격)</p>
+                      <p className="text-gray-600">오류를 거의 허용하지 않음. 데이터에 딱 맞춤 → 과적합 위험 ⚠️</p>
+                    </div>
+                    <div className={`p-2 rounded ${costC <= 1 ? 'bg-blue-100 border border-blue-300' : 'bg-gray-50'}`}>
+                      <p className="font-semibold text-blue-700">낮은 C (유연)</p>
+                      <p className="text-gray-600">오류를 어느정도 허용. 부드러운 경계 → 일반화 성능 ✅</p>
+                    </div>
+                  </div>
                 </div>
 
                 <div className="bg-green-50 p-4 rounded-lg border border-green-200">
@@ -569,10 +890,13 @@
                       클래스 B 추가
                     </button>
                   </div>
+                  <div className="mt-3 text-xs text-gray-600 bg-white p-2 rounded">
+                    💡 학습 후 슬라이더를 움직이면 자동으로 재학습됩니다!
+                  </div>
                 </div>
 
-                <div className="bg-orange-50 p-4 rounded-lg border border-orange-200">
-                  <h3 className="font-bold text-orange-900 mb-3 flex items-center gap-2">
+                <div className="bg-slate-50 p-4 rounded-lg border border-slate-200">
+                  <h3 className="font-bold text-slate-900 mb-3 flex items-center gap-2">
                     <span className="text-xl">🎮</span>
                     <span>동작</span>
                   </h3>
@@ -648,28 +972,43 @@
                       <div className="space-y-3">
                         <div className="bg-white p-4 rounded-lg shadow-sm">
                           <p className="font-semibold text-gray-800 mb-2">
-                            🔍 {kernelMode === 'linear' ? '직선 커널' : kernelMode === 'polynomial' ? `다항식 커널 (${polynomialDegree}차)` : `RBF 커널 (γ=${rbfGamma.toFixed(2)})`}
+                            🔍 {kernelMode === 'linear' ? '직선 커널' : kernelMode === 'polynomial' ? `다항식 커널 (${polynomialDegree}차)` : kernelMode === 'sigmoid' ? `시그모이드 커널 (α=${sigmoidAlpha.toFixed(3)})` : `RBF 커널 (γ=${rbfGamma.toFixed(2)})`} | Cost = {costC.toFixed(1)}
                           </p>
                           <div className="space-y-2 text-sm text-gray-700">
                             {kernelMode === 'linear' && (
                               <>
-                                <p>• <span className="font-semibold text-blue-600">파란 실선</span>: 두 클래스를 나누는 결정 경계</p>
+                                <p>• <span className="font-semibold text-green-600">녹색 실선</span>: 두 클래스를 나누는 결정 경계</p>
                                 <p>• <span className="font-semibold text-blue-400">파란 점선</span>: 마진 경계 (서포트 벡터와의 거리)</p>
                                 <p>• 두 점선 사이의 거리가 <span className="font-bold text-green-600">마진</span>입니다</p>
+                                {costC >= 5 && <p className="text-red-600 font-semibold">⚠️ 높은 C값: 마진이 좁고 엄격한 경계선</p>}
+                                {costC <= 1 && <p className="text-blue-600 font-semibold">✅ 낮은 C값: 마진이 넓고 유연한 경계선</p>}
                               </>
                             )}
                             {kernelMode === 'polynomial' && (
                               <>
-                                <p>• <span className="font-semibold text-blue-600">파란 곡선</span>: 곡선 형태의 결정 경계</p>
+                                <p>• <span className="font-semibold text-green-600">녹색 곡선</span>: 곡선 형태의 결정 경계</p>
                                 <p>• 타원, 포물선 등 복잡한 패턴 분류 가능</p>
                                 <p>• 배경색으로 각 영역의 소속 클래스 표시</p>
+                                {costC >= 5 && <p className="text-red-600 font-semibold">⚠️ 높은 C값: 데이터에 과하게 맞춤</p>}
+                                {costC <= 1 && <p className="text-blue-600 font-semibold">✅ 낮은 C값: 일반화된 패턴 학습</p>}
                               </>
                             )}
                             {kernelMode === 'rbf' && (
                               <>
-                                <p>• <span className="font-semibold text-blue-600">파란 곡선</span>: 자유로운 형태의 결정 경계</p>
+                                <p>• <span className="font-semibold text-green-600">녹색 곡선</span>: 자유로운 형태의 결정 경계</p>
                                 <p>• 점에서 멀어질수록 색이 연해지는 그라데이션 효과</p>
                                 <p>• 가장 복잡한 패턴도 분류 가능!</p>
+                                {costC >= 5 && <p className="text-red-600 font-semibold">⚠️ 높은 C값: 각 점마다 정확히 맞춤 (과적합)</p>}
+                                {costC <= 1 && <p className="text-blue-600 font-semibold">✅ 낮은 C값: 전체적인 경향 파악</p>}
+                              </>
+                            )}
+                            {kernelMode === 'sigmoid' && (
+                              <>
+                                <p>• <span className="font-semibold text-green-600">녹색 곡선</span>: S자 형태의 비선형 결정 경계</p>
+                                <p>• 신경망처럼 여러 개의 sigmoid(S자) 함수를 조합하여 동작</p>
+                                <p>• 복잡하고 구불구불한 패턴도 학습 가능</p>
+                                {costC >= 5 && <p className="text-red-600 font-semibold">⚠️ 높은 C값: 데이터에 매우 민감한 복잡한 경계</p>}
+                                {costC <= 1 && <p className="text-blue-600 font-semibold">✅ 낮은 C값: 전체적인 경향을 따르는 부드러운 경계</p>}
                               </>
                             )}
                             <p className="mt-2 pt-2 border-t border-gray-200">
@@ -681,7 +1020,17 @@
                         </div>
 
                         <div className="bg-indigo-50 p-4 rounded-lg">
-                          <p className="text-sm font-semibold text-indigo-900 mb-2">💡 SVM의 핵심 아이디어</p>
+                          <p className="text-sm font-semibold text-indigo-900 mb-2">💡 Cost(C) 파라미터의 역할</p>
+                          <p className="text-sm text-gray-700 leading-relaxed">
+                            Cost는 <span className="font-bold text-orange-600">"얼마나 엄격하게 분류할 것인가?"</span>를 결정합니다. 
+                            <span className="font-bold text-red-600">높은 C</span>는 모든 데이터를 정확히 분류하려고 해서 복잡한 경계를 만들고, 
+                            <span className="font-bold text-blue-600">낮은 C</span>는 몇 개의 오류를 허용하더라도 단순하고 일반화된 경계를 만듭니다.
+                            마치 시험에서 100점만 받으려는 것(높은 C) vs 80점 정도면 만족하는 것(낮은 C)의 차이와 같아요!
+                          </p>
+                        </div>
+
+                        <div className="bg-purple-50 p-4 rounded-lg">
+                          <p className="text-sm font-semibold text-purple-900 mb-2">🎯 SVM의 핵심 아이디어</p>
                           <p className="text-sm text-gray-700 leading-relaxed">
                             SVM은 단순히 경계선을 그리는 것이 아니라, <span className="font-bold text-purple-600">양쪽 클래스와 최대한 멀리 떨어진 경계선</span>을 찾습니다. 
                             이렇게 하면 새로운 데이터가 들어왔을 때도 정확하게 분류할 수 있어요! 
@@ -694,23 +1043,32 @@
                 </div>
 
                 <div className="flex justify-center gap-6 p-4 bg-gray-50 rounded-lg border border-gray-200">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2" title="지도교사 김동주">
                     <div className="w-5 h-5 bg-red-500 rounded-full border-2 border-gray-800"></div>
-                    <span className="font-medium text-gray-700">클래스 A (축구반)</span>
+                    <span className="font-medium text-gray-700">클래스 A (배드민턴반)</span>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2" title="베아트리스">
                     <div className="w-5 h-5 bg-blue-500 rounded-full border-2 border-gray-800"></div>
-                    <span className="font-medium text-gray-700">클래스 B (농구반)</span>
+                    <span className="font-medium text-gray-700">클래스 B (댄스반)</span>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 cursor-pointer relative" onClick={() => {
+                    setShowSVTooltip(true);
+                    setTimeout(() => setShowSVTooltip(false), 500);
+                  }}>
                     <div className="w-5 h-5 bg-white rounded-full border-4 border-yellow-500"></div>
                     <span className="font-medium text-gray-700">서포트 벡터</span>
+                    {showSVTooltip && (
+    <div className="absolute bottom-full mb-2 left-1/2 transform -translate-x-1/2 bg-yellow-900 text-white text-xs px-4 py-2 rounded-lg shadow-lg whitespace-nowrap z-50">
+      🎉 참새다!
+      <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-yellow-900"></div>
+    </div>
+  )}
                   </div>
                 </div>
 
                 <div className="bg-gradient-to-r from-purple-50 to-pink-50 p-5 rounded-lg border border-purple-200">
                   <h3 className="text-lg font-bold text-purple-900 mb-3">🧠 커널의 종류 이해하기</h3>
-                  <div className="grid md:grid-cols-3 gap-4">
+                  <div className="grid md:grid-cols-4 gap-4">
                     <div className="bg-white p-4 rounded-lg shadow-sm">
                       <h4 className="font-bold text-purple-600 mb-2">직선 커널 📏</h4>
                       <p className="text-sm text-gray-700">
@@ -730,6 +1088,15 @@
                       <p className="text-sm text-gray-700">
                         가장 유연한 형태예요! 점에서 가까울수록 영향이 크고, 멀수록 
                         영향이 작아지는 원리로 아주 복잡한 패턴도 분류할 수 있어요.
+                      </p>
+                    </div>
+                    <div className="bg-white p-4 rounded-lg shadow-sm">
+                      <h4 className="font-bold text-purple-600 mb-2">시그모이드 커널 🧮</h4>
+                      <p className="text-sm text-gray-700">
+                        S자 곡선(sigmoid)을 사용하는 커널이에요! 
+                        신경망처럼 여러 개의 S자 함수를 조합해서 
+                        복잡하고 구불구불한 경계선을 만들 수 있습니다. 
+                        딥러닝과 연결되는 방식이라 흥미로워요!
                       </p>
                     </div>
                   </div>

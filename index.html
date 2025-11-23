@@ -4,10 +4,17 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>SVM 알고리즘</title>
-  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React -->
+  <script src="react.production.min.js"></script>
+  <script src="react-dom.production.min.js"></script>
+  
+  <!-- Babel -->
+  <script src="babel.min.js"></script>
+  
+  <!-- Tailwind CSS -->
+  <script src="tailwind.js"></script> 
+  <!-- <link rel="stylesheet" href="tailwind.min.css">  -->
+  <!-- <script src="https://cdn.tailwindcss.com"></script> --> 
   <style>
     body { 
       font-family: 'Malgun Gothic', sans-serif; 
@@ -513,14 +520,25 @@
                 const v = [predict(x, y), predict(x + 4, y), predict(x + 4, y + 4), predict(x, y + 4)];
                 const s = v.map(val => val >= 0 ? 1 : 0);
                 const cfg = s[0] * 8 + s[1] * 4 + s[2] * 2 + s[3];
+                
                 if (cfg !== 0 && cfg !== 15) {
                   ctx.beginPath();
-                  if (cfg === 1 || cfg === 14) {
-                    ctx.moveTo(x + 4 * Math.abs(v[0]) / (Math.abs(v[0]) + Math.abs(v[1])), y);
-                    ctx.lineTo(x, y + 4 * Math.abs(v[0]) / (Math.abs(v[0]) + Math.abs(v[3])));
-                  } else if (cfg === 3 || cfg === 12) {
-                    ctx.moveTo(x, y + 4 * Math.abs(v[0]) / (Math.abs(v[0]) + Math.abs(v[3])));
-                    ctx.lineTo(x + 4, y + 4 * Math.abs(v[1]) / (Math.abs(v[1]) + Math.abs(v[2])));
+                  const t1 = Math.abs(v[0]) / (Math.abs(v[0]) + Math.abs(v[1]) + 0.001);
+                  const t2 = Math.abs(v[0]) / (Math.abs(v[0]) + Math.abs(v[3]) + 0.001);
+                  const t3 = Math.abs(v[2]) / (Math.abs(v[2]) + Math.abs(v[3]) + 0.001);
+                  const t4 = Math.abs(v[2]) / (Math.abs(v[2]) + Math.abs(v[1]) + 0.001);
+                  const t5 = Math.abs(v[1]) / (Math.abs(v[1]) + Math.abs(v[0]) + 0.001);
+                  const t6 = Math.abs(v[1]) / (Math.abs(v[1]) + Math.abs(v[2]) + 0.001);
+                  const t7 = Math.abs(v[3]) / (Math.abs(v[3]) + Math.abs(v[0]) + 0.001);
+                  const t8 = Math.abs(v[3]) / (Math.abs(v[3]) + Math.abs(v[2]) + 0.001);
+                  
+                  switch(cfg) {
+                    case 1: case 14: ctx.moveTo(x + 4 * t1, y); ctx.lineTo(x, y + 4 * t2); break;
+                    case 2: case 13: ctx.moveTo(x + 4 * t3, y + 4); ctx.lineTo(x + 4, y + 4 * t4); break;
+                    case 3: case 12: ctx.moveTo(x, y + 4 * t2); ctx.lineTo(x + 4, y + 4 * t6); break;
+                    case 4: case 11: ctx.moveTo(x + 4 * t5, y); ctx.lineTo(x + 4, y + 4 * t6); break;
+                    case 6: case 9: ctx.moveTo(x + 4 * t1, y); ctx.lineTo(x + 4 * t8, y + 4); break;
+                    case 7: case 8: ctx.moveTo(x, y + 4 * t7); ctx.lineTo(x + 4 * t8, y + 4); break;
                   }
                   ctx.stroke();
                 }
